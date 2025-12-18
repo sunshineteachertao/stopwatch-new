@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>60秒精密秒表 - 逢5显示全屏版</title>
+    <style>
+        :root {
+            --bg: #f5f6f7;
+            --panel-bg: rgba(44, 62, 80, 0.98);
+            --led-green: #2ecc71;
+            --dark-red: #a00000; 
+            --axle-color: #2c3e50;
+        }
+        body {
+            font-family: 'Helvetica Neue', Arial, sans-serif;
+            background-color: var(--bg);
+            margin: 0; overflow: hidden; 
+            height: 100vh; width: 100vw;
+            display: flex; justify-content: center; align-items: center;
+        }
+
+        /* --- 交互面板 --- */
+        #draggable-panel {
+            position: fixed; right: 25px; bottom: 25px; 
+            width: 280px; background: var(--panel-bg);
+            padding: 18px; border-radius: 15px;
+            z-index: 1000; color: white;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.4);
+            user-select: none; touch-action: none;
+        }
+        .panel-digital {
+            background: #000; color: var(--led-green);
+            padding: 12px; border-radius: 8px;
+            font-family: 'Courier New', monospace; font-size: 38px; 
+            text-align: center; margin-bottom: 12px;
+            border: 2px solid #333; transition: opacity 0.3s;
+            letter-spacing: 2px;
+        }
+        .btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+        .btn { padding: 12px; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 13px; transition: 0.2s; }
+        .btn-start { background: #27ae60; color: white; }
+        .btn-pause { background: #e67e22; color: white; }
+        .btn-reset { background: #7f8c8d; color: white; }
+        .btn-random { background: #9b59b6; color: white; }
+        .btn-toggle { background: #34495e; color: white; }
+        .btn-fullscreen { background: #2c3e50; color: white; border: 1px solid #5d6d7e; }
+        .btn:hover { opacity: 0.9; transform: scale(0.97); }
+
+        /* --- 秒表主体 --- */
+        #watch-container {
+            position: absolute; left: 50%; top: 50%;
+            transform: translate(-50%, -50%);
+            cursor: grab; touch-action: none;
+        }
+        #scaler { transform-origin: center center; transition: transform 0.1s; }
+        .shell {
+            width: 600px; height: 600px;
+            background: #fff;
+            border: 22px solid #2c3e50;
+            border-radius: 50%;
+            display: flex; align-items: center; justify-content: center;
+            box-shadow: 0 30px 60px rgba(0,0,0,0.2);
+        }
+    </style>
+</head>
+<body>
+
+    <div id="draggable-panel">
+        <div id="panel-handle" style="cursor:move; text-align:center; padding-bottom:10px; font-size:12px; color:#bdc3c7;">⠿ 拖拽控制面板</div>
+        <div class="panel-digital" id="digital">00:00.0</div>
+        <div class="btn-grid">
+            <button class="btn btn-start" onclick="start()">启动</button>
+            <button class="btn btn-pause" onclick="pause()">暂停</button>
+            <button class="btn btn-reset" onclick="reset()">归零</button>
+            <button class="btn btn-random" onclick="randomTime()">随机</button>
+            <button class="btn btn-toggle" id="toggleBtn" onclick="toggleDigital()">隐藏时间</button>
+            <button class="btn btn-fullscreen" id="fsBtn" onclick="toggleFullScreen()">进入全屏</button>
+        </div>
+        <div style="margin-top:15px; border-top:1px solid rgba(255,255,255,0.1); padding-top:10px;">
+            <input type="range" id="zoomRange" min="0.5" max="2.5" step="0.1" value="1" style="width:100%">
+        </div>
+    </div>
+
+    <div id="watch-container">
+        <div id="scaler">
+            <div class="shell" id="watch-handle">
+                <canvas id="canvas" width="580" height="580"></canvas>
+            </div>
+        </div>
+    </div>
+
+<script>
+    // --- 全屏功能逻辑 ---
+    function toggleFullScreen() {
+        if (!document.fullscreenElement) {
+            document.documentElement.requestFullscreen().catch(err => {
+                alert(`无法切换全屏: ${err.message}`);
+            });
+            document.getElementById('fsBtn').innerText = "退出全屏";
+        } else {
+            if (document.exitFullscreen) {
+                document.exitFullscreen();
+                document.getElementById('fsBtn').innerText = "进入全屏";
+            }
+        }
+    }
+
+    // --- 拖拽逻辑 ---
+    function initDrag(el, handle, isCentered) {
+        let dragging = false, offset = {x:0, y:0};
+        handle.onpointerdown = e => {
+            dragging = true;
+            const r = el.getBoundingClientRect();
+            offset = { x: e.clientX - r.left, y: e.clientY - r.top };
+            if(isCentered) { el.style.transform = 'none'; el.style.left = r.left + 'px'; el.style.top = r.top + 'px'; isCentered = false; }
+            handle.setPointerCapture(e.pointerId);
+        };
+        handle.onpointermove = e => { if(!dragging) return; el.style.left = (e.clientX - offset.x) + 'px'; el.style.top = (e.clientY - offset.y) + 'px'; el.style.right = 'auto'; el.style.bottom = 'auto'; };
+        handle.onpointerup = () => dragging = false;
+    }
+
+    initDrag(document.getElementById('draggable-panel'), document.getElementById('panel-handle'), false);
+    initDrag(document.getElementById('watch-container'), document.getElementById('watch-handle'), true);
+
+    const canvas = document.getElementById('canvas'), ctx = canvas.getContext('2d');
+    let startTime = 0, elapsed = 0, running = false, digitalVisible = true;
+
+    document.getElementById('zoomRange').oninput = e => document.getElementById('scaler').style.transform = `scale(${e.target.value})`;
+
+    function toggleDigital() {
+        digitalVisible = !digitalVisible;
+        document.getElementById('digital').style.opacity = digitalVisible ? "1" : "0";
+        document.getElementById('toggleBtn').innerText = digitalVisible ? "显示时间" : "隐藏时间";
+    }
+
+    function randomTime() {
+        pause();
+        elapsed = Math.floor(Math.random() * 1800000);
+        updateDigital(); draw();
+    }
+
+    function draw() {
+        const cx = 290, cy = 290;
+        ctx.clearRect(0, 0, 580, 580);
+
+        // --- 外圈 60s 逢 5 显示逻辑 ---
+        ctx.save(); ctx.translate(cx, cy);
+        const radius = 238;
+
+        for (let i = 0; i < 600; i++) {
+            let angle = (Math.PI * 2 / 600) * i;
+            ctx.save(); ctx.rotate(angle);
+            ctx.beginPath();
+            ctx.strokeStyle = '#000';
+            
+            if (i % 50 === 0) { // 逢 5 秒的倍数
+                ctx.moveTo(0, -280); ctx.lineTo(0, -240);
+                let isTen = (i % 100 === 0);
+                ctx.lineWidth = isTen ? 5.5 : 4;
+                ctx.stroke(); ctx.restore(); ctx.save();
+                
+                let sec = i / 10;
+                let val = (sec === 0) ? "60" : sec;
+                if (isTen) {
+                    drawText(ctx, val, angle, radius, "bold 28px Arial", "#000");
+                } else {
+                    drawText(ctx, val, angle, radius, "bold 24px Arial", "var(--dark-red)");
+                }
+            } else if (i % 10 === 0) { 
+                ctx.moveTo(0, -280); ctx.lineTo(0, -250);
+                ctx.lineWidth = 2.5; ctx.stroke();
+            } else if (i % 5 === 0) { 
+                ctx.moveTo(0, -280); ctx.lineTo(0, -262);
+                ctx.lineWidth = 1.5; ctx.stroke();
+            } else { 
+                ctx.moveTo(0, -280); ctx.lineTo(0, -270);
+                ctx.lineWidth = 0.8; ctx.stroke();
+            }
+            ctx.restore();
+        }
+        ctx.restore();
+
+        // --- 内圈 30min ---
+        const sx = 290, sy = 200, r = 85;
+        ctx.save(); ctx.translate(sx, sy);
+        ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.strokeStyle = '#000'; ctx.lineWidth = 3.5; ctx.stroke();
+        for (let i = 0; i < 30; i++) {
+            let angle = (Math.PI * 2 / 30) * i;
+            ctx.save(); ctx.rotate(angle);
+            ctx.beginPath(); ctx.moveTo(0, -r);
+            ctx.lineTo(0, -r + 15);
+            ctx.lineWidth = 3; ctx.stroke();
+            ctx.restore();
+            let val = (i === 0) ? "30" : i;
+            if (i % 5 === 0) drawText(ctx, val, angle, r - 30, "bold 17px Arial", "#000");
+        }
+        ctx.beginPath(); ctx.arc(0, 0, 5, 0, Math.PI * 2); ctx.fillStyle = "var(--axle-color)"; ctx.fill();
+        ctx.restore();
+
+        // 指针
+        const totalSec = elapsed / 1000;
+        renderHand(ctx, cx, cy, (totalSec / 60) * Math.PI * 2, 255, 3.5, "#b71c1c"); 
+        renderHand(ctx, sx, sy, (totalSec / 1800) * Math.PI * 2, 55, 4.5, "#fb8c00"); 
+        ctx.beginPath(); ctx.arc(cx, cy, 12, 0, Math.PI * 2); ctx.fillStyle = "var(--axle-color)"; ctx.fill();
+    }
+
+    function drawText(ctx, txt, angle, dist, font, color) {
+        let x = Math.sin(angle) * dist, y = -Math.cos(angle) * dist;
+        ctx.save(); ctx.font = font; ctx.fillStyle = color;
+        ctx.textAlign = "center"; ctx.textBaseline = "middle";
+        ctx.fillText(txt, x, y); ctx.restore();
+    }
+
+    function renderHand(ctx, x, y, angle, len, w, color) {
+        ctx.save(); ctx.translate(x, y); ctx.rotate(angle);
+        ctx.beginPath(); ctx.moveTo(0, 25); ctx.lineTo(0, -len);
+        ctx.strokeStyle = color; ctx.lineWidth = w; ctx.lineCap = 'round'; ctx.stroke();
+        ctx.restore();
+    }
+
+    function start() { if(!running){ running=true; startTime=Date.now()-elapsed; tick(); } }
+    function pause() { running=false; }
+    function reset() { running=false; elapsed=0; updateDigital(); draw(); }
+    function tick() { if(!running) return; elapsed = Date.now()-startTime; updateDigital(); draw(); requestAnimationFrame(tick); }
+    function updateDigital() { 
+        let totalSeconds = elapsed / 1000;
+        let m = Math.floor(totalSeconds / 60);
+        let s = totalSeconds % 60;
+        document.getElementById('digital').innerText = `${m.toString().padStart(2,'0')}:${s.toFixed(1).padStart(4,'0')}`; 
+    }
+    draw();
+</script>
+</body>
+</html>
